@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:rls": "node scripts/verify-rls.js",
+    "test:error": "node scripts/test-error-handler.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
@@ -18,6 +20,7 @@
     "tailwind-merge": "^3.0.2"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@tailwindcss/vite": "^4.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.0.0",
