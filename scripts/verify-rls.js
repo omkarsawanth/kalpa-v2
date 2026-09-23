@@ -40,7 +40,7 @@ async function verifyRLS() {
     grant usage on schema public to anon, authenticated;
   `)
 
-  console.log('[2/4] Executing Phase 1 & Phase 2 Migrations...')
+  console.log('[2/4] Executing Phase 1, Phase 2 & Phase 3 Migrations...')
   const m1Path = path.resolve('supabase/migrations/20260922000000_initial_schema.sql')
   const m1Sql = fs.readFileSync(m1Path, 'utf8')
   await db.exec(m1Sql)
@@ -48,6 +48,10 @@ async function verifyRLS() {
   const m2Path = path.resolve('supabase/migrations/20260923000000_phase2_tables.sql')
   const m2Sql = fs.readFileSync(m2Path, 'utf8')
   await db.exec(m2Sql)
+
+  const m3Path = path.resolve('supabase/migrations/20260923000001_streak_rpc.sql')
+  const m3Sql = fs.readFileSync(m3Path, 'utf8')
+  await db.exec(m3Sql)
 
   await db.exec(`
     grant all on all tables in schema public to anon, authenticated;
@@ -312,15 +316,82 @@ async function verifyRLS() {
     { type: 'affected', count: 0 }
   )
 
+  // --- PHASE 3 TESTS: ATOMIC STREAK RPC & EXPLOIT PREVENTION ---
+
+  // 26. User A calls complete_daily_task()
+  await db.exec(`set role authenticated; set "request.jwt.claim.sub" = '${userA_id}';`)
+  await testExpectation(
+    "User A can complete daily task atomically via RPC (streak initialized to 1)",
+    async () => {
+      const res = await db.query(`select public.complete_daily_task() as result;`)
+      const data = res.rows[0].result
+      if (data.current_streak === 1 && data.already_completed === false) {
+        return { rows: [data] }
+      }
+      throw new Error(`Unexpected streak result: ${JSON.stringify(data)}`)
+    },
+    { type: 'rowCount', count: 1 }
+  )
+
+  // 27. User A calls complete_daily_task() again today (idempotent, already_completed = true)
+  await testExpectation(
+    "User A calling complete_daily_task() again today is idempotent (already_completed: true)",
+    async () => {
+      const res = await db.query(`select public.complete_daily_task() as result;`)
+      const data = res.rows[0].result
+      if (data.current_streak === 1 && data.already_completed === true) {
+        return { rows: [data] }
+      }
+      throw new Error(`Unexpected streak result on second call: ${JSON.stringify(data)}`)
+    },
+    { type: 'rowCount', count: 1 }
+  )
+
+  // 28. User B attempts to call complete_daily_task for User A (Exploit prevention)
+  await db.exec(`set role authenticated; set "request.jwt.claim.sub" = '${userB_id}';`)
+  await testExpectation(
+    "User B CANNOT call complete_daily_task for User A (Cross-user exploit blocked by Postgres)",
+    () => db.query(`select public.complete_daily_task('${userA_id}');`),
+    { type: 'error', code: '42501', message: 'Permission denied: cannot complete streak for another user' }
+  )
+
+  // 29. Anonymous user cannot call complete_daily_task
+  await db.exec(`set role anon; set "request.jwt.claim.sub" = '';`)
+  await testExpectation(
+    "Anonymous user CANNOT call complete_daily_task (Permission denied / 42501)",
+    () => db.query(`select public.complete_daily_task('${userA_id}');`),
+    { type: 'error', code: '42501' }
+  )
+
+  // 30. Streak increments when last_completed_date was yesterday
+  await db.exec(`
+    reset role;
+    update public.profiles set last_completed_date = current_date - 1 where id = '${userA_id}';
+    set role authenticated;
+    set "request.jwt.claim.sub" = '${userA_id}';
+  `)
+  await testExpectation(
+    "User A completing task when last_completed was yesterday increments streak to 2",
+    async () => {
+      const res = await db.query(`select public.complete_daily_task() as result;`)
+      const data = res.rows[0].result
+      if (data.current_streak === 2 && data.already_completed === false) {
+        return { rows: [data] }
+      }
+      throw new Error(`Expected streak 2, got: ${JSON.stringify(data)}`)
+    },
+    { type: 'rowCount', count: 1 }
+  )
+
   console.log('\n[4/4] Verification Summary:')
   console.log(`      Total Security Tests: ${totalTests}`)
   console.log(`      Passed: ${passedTests}`)
   console.log(`      Failed: ${totalTests - passedTests}`)
 
   if (passedTests === totalTests) {
-    console.log('\n>>> SUCCESS: ALL ROW LEVEL SECURITY POLICIES (PHASE 1 & PHASE 2) ARE ENFORCED AND VERIFIED. <<<\n')
+    console.log('\n>>> SUCCESS: ALL ROW LEVEL SECURITY POLICIES & RPC FUNCTIONS ARE ENFORCED AND VERIFIED. <<<\n')
   } else {
-    console.error('\n>>> FAILURE: Some RLS policies failed verification. <<<\n')
+    console.error('\n>>> FAILURE: Some RLS/RPC security tests failed verification. <<<\n')
     process.exit(1)
   }
 }
