@@ -194,10 +194,17 @@ export default function QuizPage() {
     setLoading(true)
     setError(null)
     try {
-      const selectedPathId =
-        profile?.selected_career_path_id || sessionStorage.getItem('kalpa_selected_path_id')
-      const storedPathName = sessionStorage.getItem('kalpa_selected_path_name')
-      if (storedPathName) setPathName(storedPathName)
+      const selectedPathId = profile?.selected_career_path_id
+      if (selectedPathId) {
+        const { data: pathData } = await supabase
+          .from('career_paths')
+          .select('name')
+          .eq('id', selectedPathId)
+          .maybeSingle()
+        if (pathData?.name) {
+          setPathName(pathData.name)
+        }
+      }
 
       let careerQuestions = []
 
@@ -331,9 +338,6 @@ export default function QuizPage() {
         } catch (wsErr) {
           console.warn('[Kalpa v2] Work style profile log notice:', wsErr.message)
         }
-
-        // Store in local storage for instant dashboard display
-        localStorage.setItem('kalpa_work_style_summary', JSON.stringify(workStyleAnswers))
       }
 
       navigate('/dashboard')

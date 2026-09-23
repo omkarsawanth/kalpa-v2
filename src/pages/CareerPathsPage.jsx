@@ -195,11 +195,6 @@ export default function CareerPathsPage() {
         }
         await refreshProfile()
       }
-      // Store in session storage for immediate offline/local quiz access
-      sessionStorage.setItem('kalpa_selected_path_id', path.id)
-      sessionStorage.setItem('kalpa_selected_path_name', path.name)
-      sessionStorage.setItem('kalpa_selected_path_category', path.category)
-
       navigate('/quiz')
     } catch (err) {
       console.error('[Kalpa v2] Selection transition error:', err.message)
