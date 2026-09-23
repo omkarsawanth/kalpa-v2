@@ -53,13 +53,17 @@ async function verifyRLS() {
   const m3Sql = fs.readFileSync(m3Path, 'utf8')
   await db.exec(m3Sql)
 
+  const m4Path = path.resolve('supabase/migrations/20260923000002_roadmap_tables.sql')
+  const m4Sql = fs.readFileSync(m4Path, 'utf8')
+  await db.exec(m4Sql)
+
   await db.exec(`
     grant all on all tables in schema public to anon, authenticated;
     insert into auth.users (id, email) values
       ('11111111-1111-1111-1111-111111111111', 'usera@example.com'),
       ('22222222-2222-2222-2222-222222222222', 'userb@example.com');
   `)
-  console.log('✓ Both migrations executed cleanly. All tables, triggers, and RLS policies created.\n')
+  console.log('✓ All migrations executed cleanly. All tables, triggers, and RLS policies created.\n')
 
   console.log('[3/4] Running Security Tests against Postgres RLS Policies:\n')
 
@@ -381,6 +385,160 @@ async function verifyRLS() {
       throw new Error(`Expected streak 2, got: ${JSON.stringify(data)}`)
     },
     { type: 'rowCount', count: 1 }
+  )
+
+  // ==========================================
+  // PHASE 4 TESTS: Roadmap & Task-Linked RPC
+  // ==========================================
+
+  // Fetch a seeded roadmap task
+  const taskQuery = await db.query(`select id, milestone_id from public.roadmap_tasks order by order_index asc limit 2;`)
+  const testTaskId1 = taskQuery.rows[0].id
+  const testTaskId2 = taskQuery.rows[1].id
+
+  // 31. Anonymous user CAN read public roadmap_milestones
+  await db.exec(`set role anon; set "request.jwt.claim.sub" = '';`)
+  await testExpectation(
+    "Anonymous user CAN read public roadmap_milestones",
+    () => db.query(`select * from public.roadmap_milestones;`),
+    { type: 'rowCount', minCount: 6 }
+  )
+
+  // 32. Anonymous user CANNOT write to roadmap_milestones
+  await testExpectation(
+    "Anonymous user CANNOT write to roadmap_milestones (Service role only)",
+    () => db.query(`
+      insert into public.roadmap_milestones (career_path_id, title, description)
+      values ('11111111-1111-1111-1111-111111111111', 'Hacked Milestone', 'Malicious insert');
+    `),
+    { type: 'error', code: '42501' }
+  )
+
+  // 33. Authenticated user CANNOT write to roadmap_milestones
+  await db.exec(`set role authenticated; set "request.jwt.claim.sub" = '${userA_id}';`)
+  await testExpectation(
+    "Authenticated user CANNOT write to roadmap_milestones (Service role only)",
+    () => db.query(`
+      insert into public.roadmap_milestones (career_path_id, title, description)
+      values ('11111111-1111-1111-1111-111111111111', 'User Milestone', 'Unauthorized insert');
+    `),
+    { type: 'error', code: '42501' }
+  )
+
+  // 34. Anonymous user CAN read public roadmap_tasks
+  await db.exec(`set role anon; set "request.jwt.claim.sub" = '';`)
+  await testExpectation(
+    "Anonymous user CAN read public roadmap_tasks",
+    () => db.query(`select * from public.roadmap_tasks;`),
+    { type: 'rowCount', minCount: 10 }
+  )
+
+  // 35. Anonymous user CANNOT write to roadmap_tasks
+  await testExpectation(
+    "Anonymous user CANNOT write to roadmap_tasks (Service role only)",
+    () => db.query(`
+      insert into public.roadmap_tasks (milestone_id, title, description)
+      values ('${taskQuery.rows[0].milestone_id}', 'Hacked Task', 'Malicious insert');
+    `),
+    { type: 'error', code: '42501' }
+  )
+
+  // 36. Authenticated user CANNOT write to roadmap_tasks
+  await db.exec(`set role authenticated; set "request.jwt.claim.sub" = '${userA_id}';`)
+  await testExpectation(
+    "Authenticated user CANNOT write to roadmap_tasks (Service role only)",
+    () => db.query(`
+      insert into public.roadmap_tasks (milestone_id, title, description)
+      values ('${taskQuery.rows[0].milestone_id}', 'User Task', 'Unauthorized insert');
+    `),
+    { type: 'error', code: '42501' }
+  )
+
+  // 37. Anonymous user CANNOT read user_roadmap_progress
+  await db.exec(`set role anon; set "request.jwt.claim.sub" = '';`)
+  await testExpectation(
+    "Anonymous user CANNOT read user_roadmap_progress",
+    () => db.query(`select * from public.user_roadmap_progress;`),
+    { type: 'rowCount', count: 0 }
+  )
+
+  // 38. Anonymous user CANNOT insert user_roadmap_progress
+  await testExpectation(
+    "Anonymous user CANNOT insert user_roadmap_progress (RLS rejection)",
+    () => db.query(`
+      insert into public.user_roadmap_progress (user_id, task_id)
+      values ('${userA_id}', '${testTaskId1}');
+    `),
+    { type: 'error', code: '42501' }
+  )
+
+  // 39. User A can complete a roadmap task atomically via complete_roadmap_task()
+  await db.exec(`set role authenticated; set "request.jwt.claim.sub" = '${userA_id}';`)
+  await testExpectation(
+    "User A can complete roadmap task atomically via RPC (task progress recorded)",
+    async () => {
+      const res = await db.query(`select public.complete_roadmap_task('${testTaskId1}') as result;`)
+      const data = res.rows[0].result
+      if (data.success === true && data.task_already_completed === false) {
+        return { rows: [data] }
+      }
+      throw new Error(`Unexpected roadmap task completion result: ${JSON.stringify(data)}`)
+    },
+    { type: 'rowCount', count: 1 }
+  )
+
+  // 40. User A can read their own user_roadmap_progress
+  await testExpectation(
+    "User A can read their own user_roadmap_progress (auth.uid = user_id)",
+    () => db.query(`select * from public.user_roadmap_progress where user_id = '${userA_id}';`),
+    { type: 'rowCount', count: 1 }
+  )
+
+  // 41. User A calling complete_roadmap_task() again on SAME task is idempotent (no error on unique constraint)
+  await testExpectation(
+    "User A calling complete_roadmap_task on same task is idempotent (task_already_completed: true)",
+    async () => {
+      const res = await db.query(`select public.complete_roadmap_task('${testTaskId1}') as result;`)
+      const data = res.rows[0].result
+      if (data.success === true && data.task_already_completed === true) {
+        return { rows: [data] }
+      }
+      throw new Error(`Expected idempotent task_already_completed true, got: ${JSON.stringify(data)}`)
+    },
+    { type: 'rowCount', count: 1 }
+  )
+
+  // 42. User B CANNOT read User A's user_roadmap_progress
+  await db.exec(`set role authenticated; set "request.jwt.claim.sub" = '${userB_id}';`)
+  await testExpectation(
+    "User B CANNOT read User A's user_roadmap_progress (Cross-user read blocked by RLS)",
+    () => db.query(`select * from public.user_roadmap_progress where user_id = '${userA_id}';`),
+    { type: 'rowCount', count: 0 }
+  )
+
+  // 43. User B CANNOT insert/update/tamper User A's user_roadmap_progress directly
+  await testExpectation(
+    "User B CANNOT insert into User A's user_roadmap_progress (RLS rejection)",
+    () => db.query(`
+      insert into public.user_roadmap_progress (user_id, task_id)
+      values ('${userA_id}', '${testTaskId2}');
+    `),
+    { type: 'error', code: '42501' }
+  )
+
+  // 44. User B CANNOT call complete_roadmap_task on behalf of User A (Caller security verification)
+  await testExpectation(
+    "User B CANNOT call complete_roadmap_task for User A (Cross-user exploit blocked by Postgres)",
+    () => db.query(`select public.complete_roadmap_task('${testTaskId2}', '${userA_id}');`),
+    { type: 'error', code: '42501', message: 'Permission denied: cannot complete task for another user' }
+  )
+
+  // 45. Anonymous user CANNOT call complete_roadmap_task
+  await db.exec(`set role anon; set "request.jwt.claim.sub" = '';`)
+  await testExpectation(
+    "Anonymous user CANNOT call complete_roadmap_task (Permission denied / 42501)",
+    () => db.query(`select public.complete_roadmap_task('${testTaskId2}');`),
+    { type: 'error', code: '42501' }
   )
 
   console.log('\n[4/4] Verification Summary:')
