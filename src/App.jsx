@@ -7,6 +7,7 @@ const LoginPage = lazy(() => import('./pages/LoginPage'))
 const CareerPathsPage = lazy(() => import('./pages/CareerPathsPage'))
 const QuizPage = lazy(() => import('./pages/QuizPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
+const RoadmapPage = lazy(() => import('./pages/RoadmapPage'))
 
 function RouteFallback() {
   return (
@@ -55,6 +56,14 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <DashboardPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/roadmap"
+          element={
+            <ProtectedRoute>
+              <RoadmapPage />
             </ProtectedRoute>
           }
         />

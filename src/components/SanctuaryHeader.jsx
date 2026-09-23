@@ -9,6 +9,7 @@ export default function SanctuaryHeader() {
 
   const navLinks = [
     { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
+    { name: 'Roadmap', path: '/roadmap', icon: BookOpen },
     { name: 'Explore Paths', path: '/paths', icon: Compass },
     { name: 'Tailored Quiz', path: '/quiz', icon: Sparkles },
   ]

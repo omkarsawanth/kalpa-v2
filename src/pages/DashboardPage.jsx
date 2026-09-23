@@ -21,6 +21,7 @@ import {
   Check,
   Calendar,
   Lock,
+  BookOpen,
 } from 'lucide-react'
 
 export default function DashboardPage() {
@@ -35,6 +36,8 @@ export default function DashboardPage() {
   const [careerPath, setCareerPath] = useState(null)
   const [workStyle, setWorkStyle] = useState(null)
   const [assessments, setAssessments] = useState([])
+  const [nextTask, setNextTask] = useState(null)
+  const [roadmapStats, setRoadmapStats] = useState({ total: 0, completed: 0 })
   const [isCompletingStreak, setIsCompletingStreak] = useState(false)
   const [streakSuccessMessage, setStreakSuccessMessage] = useState(null)
 
@@ -59,6 +62,7 @@ export default function DashboardPage() {
       setUserProfile(activeProfile)
 
       // 2. Fetch Selected Career Path details from Supabase
+      let activePath = null
       if (activeProfile?.selected_career_path_id) {
         const { data: pathData, error: pathErr } = await supabase
           .from('career_paths')
@@ -67,6 +71,7 @@ export default function DashboardPage() {
           .maybeSingle()
 
         if (!pathErr && pathData) {
+          activePath = pathData
           setCareerPath(pathData)
         }
       } else {
@@ -76,7 +81,10 @@ export default function DashboardPage() {
           .select('*')
           .limit(1)
           .maybeSingle()
-        if (defaultPath) setCareerPath(defaultPath)
+        if (defaultPath) {
+          activePath = defaultPath
+          setCareerPath(defaultPath)
+        }
       }
 
       // 3. Fetch Work Style Profile from Supabase
@@ -95,6 +103,55 @@ export default function DashboardPage() {
         .eq('user_id', user.id)
 
       setAssessments(assessmentData || [])
+
+      // 5. Fetch Roadmap Milestones, Tasks, and User Progress
+      if (activePath?.id) {
+        const { data: mData } = await supabase
+          .from('roadmap_milestones')
+          .select('*')
+          .eq('career_path_id', activePath.id)
+          .order('order_index', { ascending: true })
+
+        const mIds = (mData || []).map((m) => m.id)
+        let tData = []
+        if (mIds.length > 0) {
+          const { data: fetchedTasks } = await supabase
+            .from('roadmap_tasks')
+            .select('*')
+            .in('milestone_id', mIds)
+            .order('order_index', { ascending: true })
+          tData = fetchedTasks || []
+        }
+
+        const { data: userProgress } = await supabase
+          .from('user_roadmap_progress')
+          .select('task_id')
+          .eq('user_id', user.id)
+
+        const completedIds = new Set((userProgress || []).map((p) => p.task_id))
+        setRoadmapStats({
+          total: tData.length,
+          completed: completedIds.size,
+        })
+
+        // Identify next incomplete task
+        let foundNext = null
+        for (const m of (mData || [])) {
+          const mTasks = tData.filter((t) => t.milestone_id === m.id)
+          for (const t of mTasks) {
+            if (!completedIds.has(t.id)) {
+              foundNext = {
+                ...t,
+                milestoneTitle: m.title,
+                phaseNumber: m.phase_number,
+              }
+              break
+            }
+          }
+          if (foundNext) break
+        }
+        setNextTask(foundNext)
+      }
     } catch (err) {
       console.error('[Kalpa v2] Error fetching dashboard data:', err.message)
       setError(err.message || 'Unable to load your sanctuary dashboard.')
@@ -107,7 +164,7 @@ export default function DashboardPage() {
     fetchDashboardData()
   }, [user])
 
-  // Complete Daily Task via atomic Supabase RPC function
+  // Complete Daily Focus Task via atomic Supabase complete_roadmap_task RPC function
   const handleCompleteDailyTask = async () => {
     if (!user || isCompletingStreak) return
 
@@ -123,26 +180,50 @@ export default function DashboardPage() {
     }))
 
     try {
-      const { data, error: rpcErr } = await supabase.rpc('complete_daily_task', {
-        target_user_id: user.id,
-      })
+      let rpcResult = null
 
-      if (rpcErr) throw rpcErr
+      if (nextTask?.id) {
+        // Complete actual roadmap task atomically
+        const { data, error: rpcErr } = await supabase.rpc('complete_roadmap_task', {
+          p_task_id: nextTask.id,
+          target_user_id: user.id,
+        })
+        if (rpcErr) throw rpcErr
+        rpcResult = data
+      } else {
+        // Fallback to daily task streak if no roadmap task available
+        const { data, error: rpcErr } = await supabase.rpc('complete_daily_task', {
+          target_user_id: user.id,
+        })
+        if (rpcErr) throw rpcErr
+        rpcResult = data
+      }
 
       // Reconcile with real database response
-      if (data?.current_streak !== undefined) {
+      if (rpcResult?.current_streak !== undefined) {
         setUserProfile((prev) => ({
           ...prev,
-          current_streak: data.current_streak,
-          last_completed_date: data.last_completed_date,
+          current_streak: rpcResult.current_streak,
+          last_completed_date: rpcResult.last_completed_date,
         }))
         await refreshProfile()
 
-        if (data.already_completed) {
-          setStreakSuccessMessage("You have already completed today's focus! Rhythm preserved.")
+        if (rpcResult.already_completed) {
+          setStreakSuccessMessage(
+            nextTask
+              ? `Task "${nextTask.title}" completed! Today's rhythm was already preserved.`
+              : "You have already completed today's focus! Rhythm preserved."
+          )
         } else {
-          setStreakSuccessMessage(`Streak elevated to ${data.current_streak} days! Flame burning bright.`)
+          setStreakSuccessMessage(
+            nextTask
+              ? `Task "${nextTask.title}" completed! Streak elevated to ${rpcResult.current_streak} days! 🔥`
+              : `Streak elevated to ${rpcResult.current_streak} days! Flame burning bright.`
+          )
         }
+
+        // Refresh dashboard data to surface the next task immediately
+        await fetchDashboardData()
       }
     } catch (err) {
       console.error('[Kalpa v2] Streak completion error:', err.message)
@@ -389,14 +470,42 @@ export default function DashboardPage() {
                     </p>
                   </div>
 
-                  <div className="pt-2 border-t border-white/5">
+                  {/* Real Next Task Spotlight */}
+                  {nextTask ? (
+                    <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/5 space-y-1.5">
+                      <div className="flex items-center justify-between text-[10px] font-mono uppercase">
+                        <span className="text-gorange font-semibold">Phase {nextTask.phaseNumber} • Focus</span>
+                        <span className="text-slate-400">Task #{nextTask.order_index}</span>
+                      </div>
+                      <h3 className="text-xs sm:text-sm font-semibold text-white leading-snug line-clamp-1">
+                        {nextTask.title}
+                      </h3>
+                      <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed">
+                        {nextTask.description}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="p-3.5 rounded-2xl bg-emerald/10 border border-emerald/20 text-emerald text-xs space-y-1">
+                      <div className="font-semibold flex items-center gap-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>All Roadmap Milestones Completed!</span>
+                      </div>
+                      <p className="text-[11px] text-slate-300">
+                        You have completed all actionable milestones in this track.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="pt-2 border-t border-white/5 space-y-2">
                     <button
                       type="button"
-                      disabled={isCompletedToday || isCompletingStreak}
+                      disabled={isCompletedToday || isCompletingStreak || !nextTask}
                       onClick={handleCompleteDailyTask}
                       className={`w-full py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
                         isCompletedToday
                           ? 'bg-emerald/15 text-emerald border border-emerald/30 cursor-default'
+                          : !nextTask
+                          ? 'bg-white/5 text-slate-400 border border-white/10 cursor-default'
                           : 'bg-gradient-to-r from-gorange to-coral text-white shadow-[0_4px_16px_rgba(255,85,0,0.35)] hover:opacity-95'
                       }`}
                     >
@@ -405,13 +514,29 @@ export default function DashboardPage() {
                           <CheckCircle2 className="w-4 h-4 text-emerald" />
                           <span>Focus Completed for Today ✓</span>
                         </>
+                      ) : !nextTask ? (
+                        <>
+                          <Award className="w-4 h-4 text-emerald" />
+                          <span>Curriculum Fully Mastered</span>
+                        </>
                       ) : (
                         <>
                           <Flame className="w-4 h-4" />
-                          <span>{isCompletingStreak ? 'Saving Focus...' : "Complete Today's Focus"}</span>
+                          <span className="truncate">
+                            {isCompletingStreak ? 'Saving Focus...' : `Complete: ${nextTask.title}`}
+                          </span>
                         </>
                       )}
                     </button>
+
+                    <Link
+                      to="/roadmap"
+                      className="text-center text-[11px] font-medium text-slate-400 hover:text-gorange transition-colors flex items-center justify-center gap-1.5 pt-1"
+                    >
+                      <BookOpen className="w-3.5 h-3.5 text-gorange" />
+                      <span>View Full Interactive Roadmap</span>
+                      <ArrowRight className="w-3 h-3 text-slate-400" />
+                    </Link>
                   </div>
                 </motion.div>
 
@@ -489,7 +614,7 @@ export default function DashboardPage() {
                   </div>
                 </motion.div>
 
-                {/* Card 3: Field Practicum Hours / Skill Level */}
+                {/* Card 3: Curriculum Milestones / Roadmap Progress */}
                 <motion.div
                   initial={{ opacity: 0, y: 16 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -499,32 +624,39 @@ export default function DashboardPage() {
                   <div className="flex items-start justify-between">
                     <div>
                       <span className="font-mono text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
-                        Field Practicum
+                        Curriculum Milestones
                       </span>
-                      <h2 className="font-display text-lg font-bold text-white mt-0.5">Craft Milestones</h2>
+                      <h2 className="font-display text-lg font-bold text-white mt-0.5">Roadmap Progress</h2>
                     </div>
                     <div className="w-12 h-12 rounded-2xl bg-violet/20 text-violet flex items-center justify-center shadow-inner border border-violet/30">
-                      <Award className="w-6 h-6" />
+                      <BookOpen className="w-6 h-6" />
                     </div>
                   </div>
 
                   <div>
                     <div className="flex items-baseline gap-2">
                       <span className="font-display text-4xl sm:text-5xl font-extrabold text-white">
-                        {totalAssessed > 0 ? `${totalAssessed * 2}.5` : '0.0'}
+                        {roadmapStats.completed}
                       </span>
-                      <span className="font-display text-base font-semibold text-violet">hours logged</span>
+                      <span className="font-display text-base font-semibold text-violet">
+                        of {roadmapStats.total} Tasks
+                      </span>
                     </div>
                     <p className="text-xs text-slate-400 mt-1">
-                      Goal: 50 hrs for Level 1 Mentor status • Sanctuary certified
+                      {roadmapStats.total > 0
+                        ? `${Math.round((roadmapStats.completed / roadmapStats.total) * 100)}% of your active track completed with zero pressure`
+                        : 'Explore path milestones to begin your learning rhythm'}
                     </p>
                   </div>
 
                   <div className="pt-2 border-t border-white/5">
-                    <div className="w-full py-2 px-3 rounded-xl bg-white/[0.03] border border-white/5 text-[11px] text-slate-400 flex items-center justify-between">
-                      <span>Status: Explorer Level 1</span>
-                      <span className="font-mono text-emerald font-semibold">Active</span>
-                    </div>
+                    <Link
+                      to="/roadmap"
+                      className="w-full py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-violet" />
+                      <span>Open Interactive Roadmap</span>
+                    </Link>
                   </div>
                 </motion.div>
               </section>
