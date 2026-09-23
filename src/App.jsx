@@ -6,7 +6,7 @@ import { AuthProvider, useAuth } from './context/AuthContext'
 const LoginPage = lazy(() => import('./pages/LoginPage'))
 const CareerPathsPage = lazy(() => import('./pages/CareerPathsPage'))
 const QuizPage = lazy(() => import('./pages/QuizPage'))
-const DashboardPlaceholderPage = lazy(() => import('./pages/DashboardPlaceholderPage'))
+const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 
 function RouteFallback() {
   return (
@@ -54,7 +54,7 @@ function AppRoutes() {
           path="/dashboard"
           element={
             <ProtectedRoute>
-              <DashboardPlaceholderPage />
+              <DashboardPage />
             </ProtectedRoute>
           }
         />
